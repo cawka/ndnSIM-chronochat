@@ -28,6 +28,8 @@ def options(opt):
 def configure(conf):
     conf.load("compiler_cxx boost ns3")
 
+    conf.check_cfg (package='ChronoSync.ns3', args=['--cflags', '--libs'], uselib_store='CHRONOSYNC', mandatory=True)
+
     conf.check_boost(lib='system iostreams')
     boost_version = conf.env.BOOST_VERSION.split('_')
     if int(boost_version[0]) < 1 or int(boost_version[1]) < 48:
@@ -77,7 +79,7 @@ def build (bld):
             target = name,
             features = ['cxx'],
             source = [scenario],
-            use = deps + " extensions",
+            use = deps + " extensions CHRONOSYNC",
             includes = "extensions"
             )
 

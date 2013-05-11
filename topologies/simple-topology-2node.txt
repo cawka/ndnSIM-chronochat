@@ -1,0 +1,9 @@
+router
+#name	city	latitude	longitude
+0	unknown	-0	0
+1	unknown	-0	100
+link
+#OSPF weight on 04/10/2003 (see http://www.abilene.iu.edu/images/Ab-IGP-topo.jpg)
+#x	y	capacity(kbps)	OSPF
+0	1	100Mbps	1	1ms
+
