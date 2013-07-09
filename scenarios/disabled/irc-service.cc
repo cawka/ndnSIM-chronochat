@@ -18,11 +18,12 @@
  * Author: Alexander Afanasyev <alexander.afanasyev@ucla.edu>
  */
 
-#include "ns3/core-module.h"
-#include "ns3/network-module.h"
-#include "ns3/internet-module.h"
-#include "ns3/assert.h"
-#include "ns3/callback.h"
+#include <ns3/core-module.h>
+#include <ns3/mobility-module.h>
+#include <ns3/network-module.h>
+#include <ns3/internet-module.h>
+#include <ns3/point-to-point-module.h>
+#include <ns3/ndnSIM-module.h>
 
 #include <ChronoSync.ns3/sync-logic.h>
 #include <ChronoSync.ns3/sync-logic-helper.h>
@@ -53,68 +54,143 @@ PrintTime (Time next)
   Simulator::Schedule (next, PrintTime, next);
 }
 
-void
-ToggleLinkStatusIpv4 (const TopologyReader::Link &link)
+int Ns3Random (int i)
 {
-  NS_LOG_DEBUG ("Toggling link from "
-                << Names::FindName (link.GetFromNetDevice ()->GetNode ())
-                << " to "
-                << Names::FindName (link.GetToNetDevice ()->GetNode ()));
-  
-  uint32_t face1 = link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->GetInterfaceForDevice (link.GetFromNetDevice ());
-  uint32_t face2 = link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->GetInterfaceForDevice (link.GetToNetDevice ());
+  static UniformVariable var;
+  return var.GetInteger (0, i);
+}
 
-  
-  NS_LOG_DEBUG (link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->IsUp (face1) << ", " <<
-                link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->IsUp (face2));
-
-  
-  if (link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->IsUp (face1))
+ApplicationContainer
+SetupApps (AnnotatedTopologyReader &reader)
+{
+  Config::SetDefault ("ns3::TcpL4Protocol::SocketType", StringValue ("ns3::TcpNewReno"));
+    
+  NodeContainer clients; // random list of clients
+  for (NodeList::Iterator node = NodeList::Begin (); node != NodeList::End (); node++)
     {
-      link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->SetDown (face1);
-      link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->SetMetric (face1, numeric_limits<uint16_t>::max ());
+      if (Names::FindName (*node).substr (0, 6) == "client")
+        {
+          clients.Add (*node);
+        }
     }
-  else
-    {
-      link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->SetUp (face1);
-      link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->SetMetric (face1, 1);
-    }
+  std::random_shuffle (clients.begin (), clients.end (), Ns3Random);
 
+  InternetStackHelper ipv4Helper;
+  ipv4Helper.InstallAll ();
+    
+  reader.AssignIpv4Addresses (Ipv4Address ("10.0.0.0"));
+  reader.ApplyOspfMetric ();
 
-  if (link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->IsUp (face2))
-    {
-      link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->SetDown (face2);
-      link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->SetMetric (face2, numeric_limits<uint16_t>::max ());
-    }
-  else
-    {
-      link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->SetUp (face2);
-      link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->SetMetric (face2, 1);
-    }
+  NodeContainer serverNodes;
+  serverNodes.Create (1);
+    
+  PointToPointHelper p2pH;
+  NetDeviceContainer serverLink = p2pH.Install (serverNodes.Get (0), clients.Get (0));
+  ipv4Helper.Install (serverNodes.Get (0));
+    
+  MobilityHelper m;
+  m.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
+  m.Install (serverNodes.Get (0));
+  Ipv4AddressHelper addressH (Ipv4Address ("5.5.5.0"), Ipv4Mask ("/24"));
+  addressH.Assign (serverLink);
+    
+  Ipv4Address serverIp ("5.5.5.1");
+      
+  Ptr<Application> server = CreateObject<MucServer> ();
+  server->SetStartTime (Seconds (0.0));
+  serverNodes.Get (0)->AddApplication (server);
 
-  
-  NS_LOG_DEBUG (link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->IsUp (face1) << ", " <<
-                link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->IsUp (face2));
+  Ipv4Address base ("1.0.0.0");
+  Ipv4AddressHelper address (base, Ipv4Mask ("/24"));
+        
+  ApplicationContainer apps;
+  for (NodeList::Iterator node = NodeList::Begin (); node != NodeList::End (); node++)
+    {
+      Ptr<Node> realNode = CreateObject<Node> ();
+      m.Install (realNode);
+      NetDeviceContainer nd = p2pH.Install (realNode, *node);
+      ipv4Helper.Install (realNode);
+      address.Assign (nd);
+        
+      Ptr<MucClient> client = CreateObject<MucClient> (serverIp, Names::FindName (*node).substr (7), m_inputFile);
+      client->SetStartTime (Seconds (1.0)); // clients should start at the same time !
+      realNode->AddApplication (client);
+      Names::Add (":"+Names::FindName (*node).substr (7), client);
+
+      apps.Add (client);
+
+      base = Ipv4Address (base.Get () + 256);
+      address.SetBase (base, Ipv4Mask ("/24"));        
+    }
+  Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
+
+  // SetUpChannelTrace ();
+  // SetUpDropTrace ();
+  // // SetUpLosses ();
+  return apps;
 }
 
 
-void
-PrintPIT ()
-{
-  for (NodeList::Iterator i = NodeList::Begin ();
-       i != NodeList::End ();
-       i ++)
-    {
-      cerr << Names::FindName (*i) << endl;
-      cerr << *(*i)->GetObject<Ccnx> ()->GetPit () << endl;
-    }
-}
+// void
+// ToggleLinkStatusIpv4 (const TopologyReader::Link &link)
+// {
+//   NS_LOG_DEBUG ("Toggling link from "
+//                 << Names::FindName (link.GetFromNetDevice ()->GetNode ())
+//                 << " to "
+//                 << Names::FindName (link.GetToNetDevice ()->GetNode ()));
+  
+//   uint32_t face1 = link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->GetInterfaceForDevice (link.GetFromNetDevice ());
+//   uint32_t face2 = link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->GetInterfaceForDevice (link.GetToNetDevice ());
+
+  
+//   NS_LOG_DEBUG (link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->IsUp (face1) << ", " <<
+//                 link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->IsUp (face2));
+
+  
+//   if (link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->IsUp (face1))
+//     {
+//       link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->SetDown (face1);
+//       link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->SetMetric (face1, numeric_limits<uint16_t>::max ());
+//     }
+//   else
+//     {
+//       link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->SetUp (face1);
+//       link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->SetMetric (face1, 1);
+//     }
+
+
+//   if (link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->IsUp (face2))
+//     {
+//       link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->SetDown (face2);
+//       link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->SetMetric (face2, numeric_limits<uint16_t>::max ());
+//     }
+//   else
+//     {
+//       link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->SetUp (face2);
+//       link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->SetMetric (face2, 1);
+//     }
+
+  
+//   NS_LOG_DEBUG (link.GetFromNetDevice ()->GetNode ()->GetObject<Ipv4> ()->IsUp (face1) << ", " <<
+//                 link.GetToNetDevice ()  ->GetNode ()->GetObject<Ipv4> ()->IsUp (face2));
+// }
+
+
+// void
+// PrintPIT ()
+// {
+//   for (NodeList::Iterator i = NodeList::Begin ();
+//        i != NodeList::End ();
+//        i ++)
+//     {
+//       cerr << Names::FindName (*i) << endl;
+//       cerr << *(*i)->GetObject<Ccnx> ()->GetPit () << endl;
+//     }
+// }
 
 int 
 main (int argc, char *argv[])
 {
-  Config::SetDefault ("ns3::DropTailQueue::MaxPackets", StringValue ("2000"));
-
   Config::SetDefault ("ns3::PointToPointNetDevice::Mtu", StringValue ("65535")); // small cheating against mtu size
   Config::SetDefault ("ns3::TcpSocket::DelAckTimeout", StringValue ("1ms")); // effectively disable delayed ACKs to make TCP behave better
   Config::SetDefault ("ns3::TcpSocket::SndBufSize", StringValue ("4294967295"));
@@ -122,100 +198,63 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::TcpSocket::ConnTimeout", TimeValue (Seconds (0.1)));
   Config::SetDefault ("ns3::RttMeanDeviation::Gain", DoubleValue (0.125));
   Config::SetDefault ("ns3::RttMeanDeviation::Gain2", DoubleValue (0.25));
-  
-  // Set maximum number of packets that will be cached (default 100)
-  Config::SetDefault ("ns3::CcnxContentStore::Size", StringValue ("10000")); // 10k messages will be cached
-  Config::SetDefault ("ns3::CcnxL3Protocol::CacheUnsolicitedData", StringValue ("true")); // to "push" data from apps to ContentStore
-  // Config::SetDefault ("ns3::CcnxL3Protocol::RandomDataDelaying", StringValue ("true")); // to reorder data and interests
 
   uint32_t run = 0;
-  uint32_t loss = 0;
-  bool seqnos = false;
-  bool manualLoss = false;
-  double randomLoss = 0.0;
+  string topology;
+  // uint32_t loss = 0;
+  // bool seqnos = false;
+  // double randomLoss = 0.0;
   Time simTime = Seconds (6000);
 
   CommandLine cmd;
   cmd.AddValue ("run",  "Simulation run", run);
-  cmd.AddValue ("loss", "Loss probability (in percents)", loss);
-  cmd.AddValue ("manualLoss", "Hard-coded link failure pattern", manualLoss);
-  cmd.AddValue ("randomLoss", "Random loss in links (double)", randomLoss);
-  cmd.AddValue ("seqnos", "Enable sequence number logging", seqnos);
+  cmd.AddValue ("topology", "Topology", topology);
+  // cmd.AddValue ("loss", "Loss probability (in percents)", loss);
+  // cmd.AddValue ("manualLoss", "Hard-coded link failure pattern", manualLoss);
+  // cmd.AddValue ("randomLoss", "Random loss in links (double)", randomLoss);
+  // cmd.AddValue ("seqnos", "Enable sequence number logging", seqnos);
   cmd.AddValue ("simTime", "Total simulation time (default 6000 seconds)", simTime);
   cmd.Parse (argc, argv);
 
-  Config::SetGlobal ("RngRun", IntegerValue (run));
-  
-  ostringstream input;
-  input << "evaluation/run-input/"
-        << "run-" << run
-        << "-numClients-" << numClients
-        << ".txt";
-
-  ostringstream inputLosses;
-  inputLosses << "evaluation/run-input/"
-              << "run-" << run
-              << "-numClients-" << numClients
-              << "-losses-" << loss
-              << ".txt";
-  
-  Experiment exp (run, numClients, loss, randomLoss);
-  exp.m_inputFile = input.str ();
-  cout << "Reading generated data from [" << input.str () << "]" << endl;
-  ifstream is (input.str ().c_str (), ios_base::in);
-  if (is.eof () || is.bad () || !is.good ())
+  if (topology.empty ())
     {
-      cerr << "Cannot open input file" << endl;
+      cerr << cmd;
       return 1;
     }
-  for (uint32_t i = 0; i < numClients; i++)
-    {
-      uint32_t id;
-      is >> id;
-      exp.clientIds.push_back (id);
-    }
+  
+  Config::SetGlobal ("RngRun", IntegerValue (run));
 
-  list< shared_ptr< Validator > > validators;
+  ostringstream resultFile;
+  resultFile << "results/"
+             << topology << "/irc-basic"
+             << "seqnos-run-" << run
+             << ".txt";
+
+  AnnotatedTopologyReader reader;
+  reader.SetFileName ("topologies/" + topology + ".txt");
+  reader.Read ();
+  
+  ApplicationContainer apps = SetupApps (reader);
+  
   list< shared_ptr< SeqNoTracer > > seqNoTracer;
-
-  ApplicationContainer apps;
-  apps = exp.Ipv4Apps ();
+  
+  boost::shared_ptr<std::ostream> seqNoTracerFile = boost::make_shared<std::ofstream> (resultFile.str ().c_str (), ios::trunc);
+  SeqNoTracer::PrintHeader (seqNoTracerFile);
 
   for (ApplicationContainer::Iterator app = apps.Begin ();
        app != apps.End ();
        app ++)
     {
-      validators.push_back (make_shared<Validator> (*app));
-      AppKnowledge[ "/" + Names::FindName (*app).substr (1) ] = make_shared<CurrentAppKnowledge> (*app);
+      string id = Names::FindName (*app).substr (1);
+      seqNoTracer.push_back (make_shared<SeqNoTracer> (*app, id, seqNoTracerFile, "IP", run));
     }
 
-  GlobalKnowledge = make_shared<CurrentGlobalKnowledge> ();
+  // Time failureTime = Seconds (0.25 * simTime.ToDouble (Time::S));
+  // Time recoveryTime = Seconds (0.75 * simTime.ToDouble (Time::S));
 
-  ofstream seqNoTracerFile;
-  if (seqnos)
-    {
-      ostringstream seqNoMapFileName;
-      seqNoMapFileName << "evaluation/run-output/seqnos"
-                       << "-numClients-" << numClients
-                       << ".txt";
+  // cout << simTime.ToDouble (Time::S)  << "s " << failureTime.ToDouble (Time::S) << "s " << recoveryTime.ToDouble (Time::S) << "s" << endl;
 
-      seqNoTracerFile.open (seqNoMapFileName.str ().c_str (), ios::app);
-
-      for (ApplicationContainer::Iterator app = apps.Begin ();
-           app != apps.End ();
-           app ++)
-        {
-          string id = Names::FindName (*app).substr (1);
-          seqNoTracer.push_back (make_shared<SeqNoTracer> (*app, id, boost::ref (seqNoTracerFile), isIpv4?"IP":"NDN", loss, run, randomLoss));
-        }
-    }
-
-  Time failureTime = Seconds (0.25 * simTime.ToDouble (Time::S));
-  Time recoveryTime = Seconds (0.75 * simTime.ToDouble (Time::S));
-
-  cout << simTime.ToDouble (Time::S)  << "s " << failureTime.ToDouble (Time::S) << "s " << recoveryTime.ToDouble (Time::S) << "s" << endl;
-
-  Simulator::Schedule (Seconds (1000.0), &Experiment::PrintTraces, &exp, Seconds (1000.0));  
+  // Simulator::Schedule (Seconds (1000.0), &Experiment::PrintTraces, &exp, Seconds (1000.0));  
   Simulator::Schedule (Seconds (500.0), PrintTime, Seconds (500.0));
 
 
