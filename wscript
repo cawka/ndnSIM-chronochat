@@ -69,7 +69,7 @@ def build (bld):
         target = "extensions",
         features = ["cxx"],
         source = bld.path.ant_glob(['extensions/**/*.cc']),
-        use = deps,
+        use = deps + " CHRONOSYNC",
         cxxflags = [bld.env.CXX11_CMD],
         )
 
