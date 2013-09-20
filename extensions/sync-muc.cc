@@ -16,6 +16,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Author: Alexander Afanasyev <alexander.afanasyev@ucla.edu>
+ *         Ilya Moiseenko <iliamo@ucla.edu>
  */
 
 #include "sync-muc.h"
@@ -25,15 +26,17 @@
 #include <ns3/simulator.h>
 #include <ns3/callback.h>
 #include <ns3/packet.h>
-#include <ns3/ccnx-name-components.h>
-#include <ns3/ccnx-content-object-header.h>
-#include <ns3/ccnx-interest-header.h>
-#include <ns3/ccnx-face.h>
-#include <ns3/ccnx-fib.h>
+#include <ns3/ndn-name.h>
+#include <ns3/ndn-data.h>
+#include <ns3/ndn-interest.h>
+#include <ns3/ndn-face.h>
+#include <ns3/ndn-fib.h>
 #include <ns3/names.h>
+#include <ns3/ndn-app.h>
 
 #include <boost/lambda/lambda.hpp>
 #include <boost/lambda/bind.hpp>
+#include <boost/lexical_cast.hpp>
 
 namespace ll = boost::lambda;
 
@@ -42,12 +45,13 @@ NS_LOG_COMPONENT_DEFINE ("SyncMuc");
 NS_OBJECT_ENSURE_REGISTERED (SyncMuc);
 
 using namespace std;
+using namespace Sync;
 
 TypeId
 SyncMuc::GetTypeId ()
 {
-  static TypeId tid = TypeId ("SyncMuc")
-    .SetParent<Application> ()
+  static TypeId tid = TypeId ("ns3::SyncMuc")
+    .SetParent<ndn::App> ()
     .AddTraceSource ("SeqNoTrace",       "Sequence number trace",
                      MakeTraceSourceAccessor (&SyncMuc::m_seqNoPrefixTrace))
     .AddTraceSource ("LatestSeqNoTrace", "Latest sequence number trace (only fired from data generation)",
@@ -84,31 +88,26 @@ SyncMuc::~SyncMuc ()
 void
 SyncMuc::StartApplication ()
 {
-  CcnxApp::StartApplication ();
+  NS_LOG_INFO ("Starting Muc");
+  ndn::App::StartApplication ();
 
   // Set up FIB
-  Ptr<CcnxNameComponents> name = Create<CcnxNameComponents> ();
-  ostringstream os;
-  os << "/" << Names::FindName (GetNode ());
+  Ptr<ndn::Name> name = Create<ndn::Name> ();
+  name->append(Names::FindName (GetNode ()));
   
-  istringstream is (os.str ());
-  is >> *name;
-  
-  Ptr<CcnxFib> fib = GetNode ()->GetObject<CcnxFib> ();
-  CcnxFibEntryContainer::type::iterator fibEntry = fib->Add (*name, m_face, 0);
+  Ptr<ndn::Fib> fib = GetNode ()->GetObject<ndn::Fib> ();
+  Ptr<ndn::fib::Entry> fibEntry = fib->Add (*name, m_face, 0);
 
   // end FIB
   
   // make face green, so it will be used primarily
-  fib->m_fib.modify (fibEntry,
-                     ll::bind (&CcnxFibEntry::UpdateStatus,
-                               ll::_1, m_face, CcnxFibFaceMetric::NDN_FIB_GREEN));
-
+  fibEntry->UpdateStatus (m_face,ndn::fib::FaceMetric::NDN_FIB_GREEN);
   
   m_logic = CreateObject<SyncLogic> (m_syncPrefix,
-                                     boost::bind (&SyncMuc::OnDataUpdate, this, _1, _2, _3),
-                                     boost::bind (&SyncMuc::OnDataRemove, this, _1));
-  m_logic->SetNode (GetNode ());  
+                                      boost::bind(&SyncMuc::Wrapper, this, _1),
+                                      boost::bind(&SyncMuc::OnDataRemove, this, _1));
+  
+  m_logic->SetNode (GetNode ());
   m_logic->StartApplication ();
 
   ScheduleNextMessage ();
@@ -117,7 +116,7 @@ SyncMuc::StartApplication ()
 void
 SyncMuc::StopApplication ()
 {
-  CcnxApp::StopApplication ();
+  ndn::App::StopApplication ();
 
   // prefix is still in fib... whatever
   
@@ -125,11 +124,22 @@ SyncMuc::StopApplication ()
 }
 
 void
+SyncMuc::Wrapper (const vector<MissingDataInfo> &v)
+{
+  int n = v.size();
+  for (int i = 0; i < n; i++)
+  {
+    OnDataUpdate (v[i].prefix, v[i].high, v[i].low);
+  }
+}
+
+void
 SyncMuc::OnDataUpdate (const std::string &prefix, const SeqNo &newSeq, const SeqNo &oldSeq)
 {
   // NS_LOG_LOGIC (Simulator::Now ().ToDouble (Time::S) << ", prefix: " << prefix << " (we are: "<< m_mucPrefix << "), seqNo: " << newSeq);
   // NS_LOG_LOGIC (prefix << ", " << newSeq << ", " << oldSeq);
-
+  NS_LOG_FUNCTION(this);
+  
   if (m_mucPrefix == prefix)
     return; // don't request our own data
   
@@ -140,36 +150,27 @@ SyncMuc::OnDataUpdate (const std::string &prefix, const SeqNo &newSeq, const Seq
     begin = oldSeq.getSeq () + 1;
 
   for (uint32_t i = begin; i <= end; i++)
-    {
-      NS_LOG_DEBUG ("<< DATA " << prefix << " seqno: " << i);
-      m_seqNoPrefixTrace (prefix, i);
+  {
+    NS_LOG_DEBUG ("<< DATA " << prefix << " seqno: " << i);
+    m_seqNoPrefixTrace (prefix, i);
       
-      // NS_LOG_INFO ("> Interest for " << prefix << "/" << i);
+    // NS_LOG_INFO ("> Interest for " << prefix << "/" << i);
       
-      if (!m_requestData)
-        continue; // just ignore
+    if (!m_requestData)
+      continue; // just ignore
       
-      Ptr<CcnxNameComponents> name = Create<CcnxNameComponents> ();
-      ostringstream os;
-      os << prefix << "/" << i;
-      
-      istringstream is (os.str ());
-      is >> *name;
-  
-      CcnxInterestHeader interestHeader;
-      interestHeader.SetNonce            (m_rand.GetValue ());
-      interestHeader.SetName             (name);
-      interestHeader.SetInterestLifetime (Seconds (60.0));
+    Ptr<ndn::Name> name = Create<ndn::Name> ();
+    name->append(prefix);
+    name->append(boost::lexical_cast<std::string>(i));
+    
+    Ptr<ndn::Interest> interest = Create<ndn::Interest> ();
+    interest->SetNonce            (m_rand.GetValue ());
+    interest->SetName             (name);
+    interest->SetInterestLifetime (Seconds (60.0));
 
-      Ptr<Packet> packet = Create<Packet> ();
-      packet->AddHeader (interestHeader);
-
-      // NS_LOG_DEBUG (interestHeader);
-  
-      m_protocolHandler (packet);
-
-      m_transmittedInterests (&interestHeader, this, m_face);
-    }
+    m_face->ReceiveInterest (interest);
+    m_transmittedInterests (interest, this, m_face);
+  }
 }
 
 void
@@ -198,6 +199,7 @@ SyncMuc::ScheduleNextMessage ()
       if (m_inputLen == 0 && id != m_id) return; //reached the end of input
 
       // cout << m_id << ": " << Seconds (delay).ToDouble (Time::S) << "s, " << Simulator::Now ().ToDouble (Time::S) << "s" << endl;
+      NS_LOG_INFO("Schedule: " << Seconds (delay) - Simulator::Now ());
       Simulator::Schedule (Seconds (delay) - Simulator::Now (),
                            &SyncMuc::SendMessage, this, msgSize);
     }
@@ -205,46 +207,28 @@ SyncMuc::ScheduleNextMessage ()
 
 bool
 SyncMuc::SendMessage (uint32_t msgLen)
-{
+{  
   if (m_logic == 0)
     return false;
   
-  NS_LOG_DEBUG ("> DATA: " << msgLen << " for " << m_mucPrefix << "/" << m_curMsgId);
-  // cout << "> DATA: " << msgLen << " for " << m_mucPrefix << "/" << m_curMsgId << endl;
+  NS_LOG_INFO ("> DATA: " << msgLen << " for " << m_mucPrefix << "/" << m_curMsgId);
   
   m_logic->addLocalNames (m_mucPrefix, 0, m_curMsgId);
   m_seqNoPrefixTrace ("/"+m_id, m_curMsgId);
   m_latestSeqNoTrace ("/"+m_id, m_curMsgId);
 
   if (m_requestData)
-    {
-      /////////////////////////////////////////////////////////////
-      /////////////////////////////////////////////////////////////
-      /////////////////////////////////////////////////////////////
-      Ptr<CcnxNameComponents> name = Create<CcnxNameComponents> ();
-      ostringstream os;
-      os << m_mucPrefix << "/" << m_curMsgId;
-  
-      istringstream is (os.str ());
-      is >> *name;
-
-      static CcnxContentObjectTail trailer;
-  
-      CcnxContentObjectHeader data;
-      data.SetName (name);
-
-      Ptr<Packet> packet = Create<Packet> (msgLen);
-  
-      packet->AddHeader (data);
-      packet->AddTrailer (trailer);
-
-      m_protocolHandler (packet);
-
-      m_transmittedContentObjects (&data, packet, this, m_face);
-      /////////////////////////////////////////////////////////////
-      /////////////////////////////////////////////////////////////
-      /////////////////////////////////////////////////////////////
-    }
+  {
+    Ptr<ndn::Name> name = Create<ndn::Name> ();
+    name->append(m_mucPrefix);
+    name->append(boost::lexical_cast<std::string>(m_curMsgId));
+    
+    Ptr<ndn::Data> data = Create<ndn::Data> (Create<Packet> (msgLen));
+    data->SetName (name);
+      
+    m_face->ReceiveData (data);
+    m_transmittedDatas (data, this, m_face);
+  }
 
   m_curMsgId ++;
 
