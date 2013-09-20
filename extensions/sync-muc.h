@@ -21,8 +21,7 @@
 #ifndef SYNC_MUC_H
 #define SYNC_MUC_H
 
-#include <ns3/application.h>
-#include <ns3/ccnx-app.h>
+#include <ns3/ndn-app.h>
 #include <ns3/traced-callback.h>
 #include <ns3/type-id.h>
 #include <fstream>
@@ -31,7 +30,7 @@
 using namespace ns3;
 using namespace Sync;
 
-class SyncMuc : public CcnxApp
+class SyncMuc : public ndn::App
 {
 public:
   static TypeId
@@ -39,7 +38,7 @@ public:
   
   SyncMuc (const std::string &syncPrefix, const std::string &mucPrefix, const std::string &id, const std::string &input, bool requestData);
   ~SyncMuc ();
-
+  
 protected:
   virtual void
   StartApplication ();
@@ -48,6 +47,9 @@ protected:
   StopApplication ();
   
 private:
+  void
+  Wrapper (const std::vector<MissingDataInfo> &v);
+
   void
   OnDataUpdate (const std::string &prefix, const SeqNo &newSeq, const SeqNo &/*oldSeq*/);
 
